@@ -1,378 +1,180 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# setup-wine-aio.sh
+# سكربت لإعداد Wine + تنزيل AIO runtimes و Chrome (مع --no-sandbox) و Telegram و Notepad++ و 7zip
+# موجه لأنظمة Debian/Ubuntu (اختبره أولاً في VM إذا أمكن)
 set -euo pipefail
 
-# ultimate-advanced-with-gui-office.sh
-# Advanced Interactive Ultimate Hybrid Setup (with whiptail UI, Office auto-install, per-prefix resource-limited launchers)
-# Target: Ubuntu 20.04.6 LTS
-# Usage:
-#   chmod +x ultimate-advanced-with-gui-office.sh
-#   ./ultimate-advanced-with-gui-office.sh
+# --- CONFIG ---
+AIO_URL="https://allinoneruntimes.org/files/aio-runtimes_v2.5.0.exe"
+AIO_FILE="$HOME/Downloads/$(basename "$AIO_URL")"
+CHROME_DEB="/tmp/google-chrome-stable_current_amd64.deb"
+NOTEPADPP_URL="https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.5.6/npp.8.5.6.Installer.exe"
+NOTEPADPP_FILE="$HOME/Downloads/$(basename "$NOTEPADPP_URL")"
+WINEPREFIX_DEFAULT="$HOME/.wine"
+DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
 
-HOME_DIR="${HOME:-/home/${SUDO_USER:-$(whoami)}}"
-TMP_DIR="/tmp/ultimate-advanced-setup"
-LOGFILE="$TMP_DIR/log.txt"
-DESKTOP_DIR="$HOME_DIR/Desktop"
-WINEPREFIX_BASE="$HOME_DIR/.wine"   # default base prefix; script can create more
-mkdir -p "$TMP_DIR" "$DESKTOP_DIR"
-touch "$LOGFILE"
-exec > >(tee -a "$LOGFILE") 2>&1
+# Helper for logging
+info(){ echo -e "\e[34m[INFO]\e[0m $*"; }
+warn(){ echo -e "\e[33m[WARN]\e[0m $*"; }
+err(){ echo -e "\e[31m[ERROR]\e[0m $*"; exit 1; }
 
-echo "===== Ultimate Advanced Setup (GUI + Office Auto + Per-Prefix Launchers) ====="
-date
-echo ""
-
-# helper: run with sudo if required
-run_sudo() {
-  if [ "$(id -u)" -eq 0 ]; then
-    bash -c "$*"
-  else
-    sudo bash -c "$*"
-  fi
-}
-
-add_desktop_entry() {
-  # add_desktop_entry /path/file.desktop "content..."
-  local path="$1"; shift
-  echo "$*" > "$path"
-  chmod +x "$path"
-  chown "$(id -u):$(id -g)" "$path" || true
-}
-
-apt_update_install() {
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt update -y"
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y $*"
-}
-
-# Ensure whiptail (for textual UI)
-if ! command -v whiptail >/dev/null 2>&1; then
-  echo "Installing whiptail for UI..."
-  apt_update_install whiptail || true
+if [ "$(id -u)" -ne 0 ]; then
+  warn "يُفضّل تشغيل هذا السكربت بصلاحيات root (sudo). سأستمر لكن قد يُطلب منك sudo أثناء التشغيل."
 fi
 
-# Simple UI: main choices
-OPTIONS=$(whiptail --title "Ultimate Hybrid Setup" --checklist \
-  "اختر المكونات التي تريد تثبيتها (استخدم المسافة للاختيار، Enter للتأكيد):" 20 80 12 \
-  "wine" "Wine Staging + winetricks (أساسي)" ON \
-  "runtimes" "Full runtimes (DirectX, .NET, VC++)" ON \
-  "nativeapps" "Native apps (Chrome, VSCode, Telegram, GIMP, 7zip)" ON \
-  "winapps" "Windows apps via Wine (Notepad++, Paint.NET...)" ON \
-  "aio" "AIO Runtimes (داخل Wine)" ON \
-  "gaming" "Gaming stack (DXVK, vkd3d, Lutris, Steam)" ON \
-  "dev" "Dev stack (Docker, Python, Node, Java, Rust, VSCode ext)" ON \
-  "office" "Microsoft Office auto-install helper (إذا وضعت الملف في $TMP_DIR)" OFF \
-  "prefix-tools" "إنشاء per-prefix launcher (CPU/RAM limits)" ON \
-  3>&1 1>&2 2>&3)
-
-# Transform OPTIONS into array with items
-# whiptail returns quoted items like: "wine" "runtimes" ...
-read -r -a CHOICES <<<"$OPTIONS"
-
-echo "You chose: ${CHOICES[*]}"
-
-# --- Step A: basic prep packages ---
-echo "--- Installing base packages ---"
-apt_update_install wget curl gnupg2 ca-certificates software-properties-common gdebi-core p7zip-full cabextract unzip xz-utils apt-transport-https ca-certificates libgl1 libgl1-mesa-dri
-
-# --- Wine installation ---
-if [[ " ${CHOICES[*]} " == *" wine "* ]]; then
-  echo "--- Installing Wine Staging & winetricks ---"
-  run_sudo "dpkg --add-architecture i386 || true"
-  run_sudo "mkdir -pm755 /etc/apt/keyrings || true"
-  run_sudo "wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key || true"
-  run_sudo "wget -q -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/focal/winehq-focal.sources || true"
-  run_sudo "apt update -y || true"
-  if ! run_sudo "DEBIAN_FRONTEND=noninteractive apt install --install-recommends -y winehq-staging winetricks libfaudio0 fonts-wine"; then
-    echo "Retrying apt fix broken..."
-    run_sudo "apt --fix-broken install -y || true"
-    run_sudo "DEBIAN_FRONTEND=noninteractive apt install --install-recommends -y winehq-staging winetricks libfaudio0 fonts-wine || true"
-  fi
-  export WINEPREFIX="$WINEPREFIX_BASE"
-  mkdir -p "$WINEPREFIX"
-  chown -R "$(id -u):$(id -g)" "$WINEPREFIX" || true
-  echo "--- wineboot init ---"
-  wineboot --init || true
+# Detect apt-based
+if ! command -v apt >/dev/null 2>&1; then
+  err "هذا السكربت مخصّص لـ Debian/Ubuntu-based systems (يستخدم apt)."
 fi
 
-# --- Full runtimes via winetricks ---
-if [[ " ${CHOICES[*]} " == *" runtimes "* ]]; then
-  echo "--- Installing Winetricks runtimes (DirectX, .NET, VC++) ---"
-  WINETRICKS_LIST=(
-    corefonts allfonts wine-mono
-    vcrun6 vcrun6sp6 vcrun2005 vcrun2008 vcrun2010 vcrun2012 vcrun2013 vcrun2015 vcrun2017 vcrun2019 msvcp140 mfc140
-    directx9 d3dx9 d3dx10 d3dx11 dxvk xact_jun2010
-    dotnet20 dotnet35 dotnet40 dotnet45 dotnet48 dotnet462
-    msxml6 gdiplus windowscodecs riched20 riched30 fontsmooth=rgb jre8 ie8
-  )
-  for pkg in "${WINETRICKS_LIST[@]}"; do
-    echo "-> winetricks $pkg"
-    if [[ "$pkg" == dotnet* ]]; then
-      WINEPREFIX="$WINEPREFIX_BASE" winetricks -q "$pkg" || {
-        echo "Warning: $pkg may require GUI; attempted non-interactive install failed; continuing..."
-      }
-    else
-      WINEPREFIX="$WINEPREFIX_BASE" winetricks -q "$pkg" || echo "Warning: $pkg failed or needed input; continuing..."
-    fi
-  done
+# Ensure Desktop exists
+mkdir -p "$DESKTOP_DIR"
+
+info "إضافة دعم المعمارية i386"
+dpkg --add-architecture i386 || true
+
+info "تحديث الحزم الأساسية وتثبيت متطلبات"
+apt update
+apt install -y --no-install-recommends software-properties-common wget gnupg2 ca-certificates curl apt-transport-https gdebi-core unzip p7zip-full p7zip-rar cabextract
+
+# --- Add WineHQ repo ---
+info "إضافة مستودع WineHQ"
+wget -qO- https://dl.winehq.org/wine-builds/winehq.key | apt-key add - || true
+# Add repository for Ubuntu releases (uses generic ubuntu codename)
+. /etc/os-release
+if [ -z "${UBUNTU_CODENAME:-}" ]; then
+  # fallback: try lsb_release
+  UBUNTU_CODENAME=$(lsb_release -sc 2>/dev/null || echo "")
+fi
+if [ -z "$UBUNTU_CODENAME" ]; then
+  warn "لم أتمكن من تحديد معرف التوزيعة تلقائيًا — سأواصل لكن قد يفشل إضافة repo."
+else
+  echo "deb https://dl.winehq.org/wine-builds/ubuntu/ $UBUNTU_CODENAME main" > /etc/apt/sources.list.d/winehq.list
 fi
 
-# --- Native Linux apps ---
-if [[ " ${CHOICES[*]} " == *" nativeapps "* ]]; then
-  echo "--- Installing native apps (Chrome, VSCode, Telegram, GIMP, 7zip) ---"
-  # Chrome
-  TMP_CHROME="$TMP_DIR/google-chrome.deb"
-  wget -q -O "$TMP_CHROME" "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" || true
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y '$TMP_CHROME' || (dpkg -i '$TMP_CHROME' || true; apt --fix-broken install -y || true)" || true
-  rm -f "$TMP_CHROME"
-  add_desktop_entry "$DESKTOP_DIR/google-chrome-no-sandbox.desktop" "[Desktop Entry]
-Version=1.0
+apt update || true
+
+info "تثبيت Wine (stable) و wine32 و winetricks"
+# try to install winehq-stable, otherwise winehq-devel, otherwise fallback to wine
+apt install -y --install-recommends winehq-stable wine-stable wine64 wine32 winbind winetricks || \
+apt install -y --install-recommends winehq-devel wine-devel wine64 wine32 winbind winetricks || \
+apt install -y wine winetricks wine64 wine32 || err "فشل تثبيت Wine. افحص المخرجات أعلاه."
+
+info "ضبط WINEPREFIX (افتراضي: $WINEPREFIX_DEFAULT) وإنشاء prefix أولي"
+export WINEPREFIX="${WINEPREFIX:-$WINEPREFIX_DEFAULT}"
+mkdir -p "$WINEPREFIX"
+# initialize prefix (this may download gecko/mono)
+WINEARCH=win64 wineboot -u || true
+
+# Install common runtimes using winetricks (non-interactive)
+info "تثبيت حزم Windows runtime شائعة عبر winetricks (corefonts, vcrun2015, vcrun2019)..."
+export WINETRICKS_QUIET=1
+winetricks -q corefonts vcrun2015 vcrun2019 || warn "winetricks فشل في بعض الحزم — قد تحتاج تنفيذها يدوياً."
+
+# --- Download AIO Runtimes EXE ---
+info "تنزيل AIO Runtimes: $AIO_URL"
+mkdir -p "$HOME/Downloads"
+if [ ! -f "$AIO_FILE" ]; then
+  wget -O "$AIO_FILE" "$AIO_URL" || warn "فشل تنزيل AIO runtimes — تأكد من الاتصال أو الرابط."
+else
+  info "AIO runtimes موجود بالفعل في $AIO_FILE"
+fi
+
+# Create desktop shortcut to open the AIO EXE with wine
+AIO_DESKTOP="$DESKTOP_DIR/AIO-Runtimes.desktop"
+info "إنشاء اختصار على الديسكتوب لفتح AIO runtimes عبر wine: $AIO_DESKTOP"
+cat > "$AIO_DESKTOP" <<EOF
+[Desktop Entry]
+Name=AIO Runtimes (open with Wine)
+Comment=Open aio-runtimes with Wine
+Exec=env WINEPREFIX="$WINEPREFIX" wine start /unix "$AIO_FILE"
+Type=Application
+Terminal=false
+Icon=applications-wine
+Categories=Utility;
+EOF
+chmod +x "$AIO_DESKTOP"
+
+# --- Reinstall Google Chrome and create desktop shortcut without sandbox ---
+info "إزالة Google Chrome (إن وُجد)"
+apt remove -y google-chrome-stable || true
+rm -f "$CHROME_DEB"
+
+info "تنزيل أحدث Google Chrome (.deb) وتثبيته"
+# official google chrome stable .deb URL
+CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+wget -O "$CHROME_DEB" "$CHROME_URL" || warn "فشل تنزيل Chrome .deb — قد تكون المشكلة في الشبكة."
+gdebi -n "$CHROME_DEB" || dpkg -i "$CHROME_DEB" || apt -f install -y
+
+# Create desktop shortcut that launches Chrome without sandbox (WARNING)
+CHROME_DESKTOP="$DESKTOP_DIR/Google-Chrome-NoSandbox.desktop"
+info "إنشاء اختصار Chrome على الديسكتوب مع --no-sandbox (غير آمن)."
+cat > "$CHROME_DESKTOP" <<EOF
+[Desktop Entry]
 Name=Google Chrome (no-sandbox)
-Comment=Google Chrome
-Exec=google-chrome --no-sandbox %U
+Exec=/usr/bin/google-chrome-stable --no-sandbox %U
 Terminal=false
 Type=Application
 Icon=google-chrome
 Categories=Network;WebBrowser;
-StartupNotify=true
-"
+EOF
+chmod +x "$CHROME_DESKTOP"
 
-  # VSCode
-  TMP_VSCODE="$TMP_DIR/vscode.deb"
-  wget -q -O "$TMP_VSCODE" "https://update.code.visualstudio.com/latest/linux-deb-x64/stable" || true
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y '$TMP_VSCODE' || (dpkg -i '$TMP_VSCODE' || true; apt --fix-broken install -y || true)" || true
-  rm -f "$TMP_VSCODE"
-  add_desktop_entry "$DESKTOP_DIR/visual-studio-code.desktop" "[Desktop Entry]
-Version=1.0
-Name=Visual Studio Code
-Comment=Code Editing
-Exec=code --no-sandbox %F
-Terminal=false
-Type=Application
-Icon=code
-Categories=Development;IDE;
-StartupNotify=true
-"
+warn "تنبيه أمني: تشغيل Google Chrome مع --no-sandbox يعطل آليات الأمان الأساسية ويجعل المتصفح عرضة للاستغلال. لا تقم بذلك إلا إذا كنت تفهم المخاطر."
 
-  # Telegram
-  run_sudo "add-apt-repository -y universe || true"
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt update -y || true"
-  if ! run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y telegram-desktop"; then
-    run_sudo "snap install telegram-desktop || true"
-  fi
-  add_desktop_entry "$DESKTOP_DIR/telegram-desktop.desktop" "[Desktop Entry]
-Version=1.0
+# --- Install Telegram Desktop (native if available) ---
+info "تثبيت Telegram Desktop (native) إن أمكن"
+apt install -y telegram-desktop || warn "قد لا يكون telegram-desktop متوفرًا عبر apt على هذه النسخة — يمكنك تثبيته يدوياً من الموقع الرسمي أو من snap/flatpak."
+
+# Create desktop shortcut (system will usually already have one), but ensure one exists
+TELE_DESKTOP="$DESKTOP_DIR/Telegram-Desktop.desktop"
+cat > "$TELE_DESKTOP" <<EOF
+[Desktop Entry]
 Name=Telegram Desktop
-Comment=Telegram Desktop Messenger
-Exec=telegram-desktop %U
-Terminal=false
-Type=Application
+Exec=telegram-desktop %u
 Icon=telegram
+Type=Application
+Terminal=false
 Categories=Network;InstantMessaging;
-StartupNotify=true
-"
-
-  # GIMP & 7zip
-  apt_update_install gimp p7zip-full p7zip-rar unrar || true
-fi
-
-# --- Windows apps via Wine ---
-if [[ " ${CHOICES[*]} " == *" winapps "* ]]; then
-  echo "--- Installing Windows apps via Wine (Notepad++, optionally Paint.NET) ---"
-  # Notepad++
-  WINEPREFIX="$WINEPREFIX_BASE" winetricks -q notepad++ || {
-    echo "winetricks notepad++ failed or not available, trying direct installer..."
-    NPP_URL="https://github.com/notepad-plus-plus/notepad-plus-plus/releases/latest/download/npp.Installer.x64.exe"
-    wget -q -O "$TMP_DIR/npp_installer.exe" "$NPP_URL" || true
-    [ -f "$TMP_DIR/npp_installer.exe" ] && wine "$TMP_DIR/npp_installer.exe" /S || echo "Notepad++ installer may require GUI."
-    rm -f "$TMP_DIR/npp_installer.exe"
-  }
-  # Create desktop entry for Notepad++
-  add_desktop_entry "$DESKTOP_DIR/notepad-plus-plus.desktop" "[Desktop Entry]
-Version=1.0
-Name=Notepad++
-Comment=Notepad++ via Wine
-Exec=env WINEPREFIX=$WINEPREFIX_BASE wine 'C:\\\\Program Files\\\\Notepad++\\\\notepad++.exe'
-Terminal=false
-Type=Application
-Icon=notepad-plus-plus
-Categories=Development;TextEditor;
-StartupNotify=true
-"
-fi
-
-# --- AIO Runtimes ---
-if [[ " ${CHOICES[*]} " == *" aio "* ]]; then
-  echo "--- Running AIO Runtimes inside Wine ---"
-  AIO_URL="https://allinoneruntimes.org/files/aio-runtimes_v2.5.0.exe"
-  wget -q -O "$TMP_DIR/aio-runtimes.exe" "$AIO_URL" || true
-  if [ -f "$TMP_DIR/aio-runtimes.exe" ]; then
-    wine "$TMP_DIR/aio-runtimes.exe" || echo "AIO installer may require GUI input; continuing..."
-    rm -f "$TMP_DIR/aio-runtimes.exe"
-  else
-    echo "AIO not downloaded; skipped."
-  fi
-fi
-
-# --- Gaming stack ---
-if [[ " ${CHOICES[*]} " == *" gaming "* ]]; then
-  echo "--- Installing Gaming stack: DXVK, vkd3d, Lutris, Steam ---"
-  WINEPREFIX="$WINEPREFIX_BASE" winetricks -q dxvk || echo "dxvk attempt failed; continuing..."
-  run_sudo "apt update -y || true"
-  run_sudo "apt install -y vkd3d-proton || run_sudo 'apt install -y vkd3d-tools' || true"
-  # Lutris
-  run_sudo "add-apt-repository -y ppa:lutris-team/lutris || true"
-  run_sudo "apt update -y || true"
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y lutris || true"
-  # Steam
-  run_sudo "add-apt-repository -y multiverse || true"
-  run_sudo "apt update -y || true"
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y steam || run_sudo 'apt install -y flatpak && flatpak install flathub com.valvesoftware.Steam -y' || true"
-fi
-
-# --- Dev stack ---
-if [[ " ${CHOICES[*]} " == *" dev "* ]]; then
-  echo "--- Installing Dev stack: Docker, Python, Node, Java, Rust, VSCode extensions ---"
-  # Docker (official)
-  run_sudo "apt remove -y docker docker-engine docker.io containerd runc || true"
-  run_sudo "apt update -y || true"
-  run_sudo "apt install -y ca-certificates curl gnupg lsb-release || true"
-  run_sudo "mkdir -p /etc/apt/keyrings || true"
-  run_sudo "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true"
-  run_sudo "echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu focal stable\" > /etc/apt/sources.list.d/docker.list || true"
-  run_sudo "apt update -y || true"
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true"
-  run_sudo "usermod -aG docker $(id -un) || true"
-
-  # Python
-  apt_update_install python3 python3-pip python3-venv || true
-
-  # Node (LTS)
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - || true
-  run_sudo "DEBIAN_FRONTEND=noninteractive apt install -y nodejs || true"
-
-  # Java
-  apt_update_install openjdk-11-jdk || true
-
-  # Rust
-  if ! command -v rustc >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || true
-    export PATH="$HOME/.cargo/bin:$PATH"
-  fi
-
-  # VSCode extensions
-  if command -v code >/dev/null 2>&1; then
-    code --install-extension ms-python.python --force || true
-    code --install-extension ms-vscode.cpptools --force || true
-    code --install-extension ms-azuretools.vscode-docker --force || true
-  fi
-fi
-
-# --- Office auto-install helper ---
-if [[ " ${CHOICES[*]} " == *" office "* ]]; then
-  echo "--- Office auto-install helper ---"
-  # Look for files named office_installer.* in TMP_DIR
-  OFFICE_FILE="$(ls -1 $TMP_DIR/office_installer.* 2>/dev/null | head -n1 || true)"
-  if [ -n "$OFFICE_FILE" ]; then
-    echo "Found Office installer: $OFFICE_FILE"
-    # If ISO, try mount and find setup.exe
-    if [[ "$OFFICE_FILE" == *.iso ]]; then
-      echo "Mounting ISO..."
-      mkdir -p "$TMP_DIR/office_iso"
-      sudo mount -o loop "$OFFICE_FILE" "$TMP_DIR/office_iso" || true
-      SETUP_PATH="$(find "$TMP_DIR/office_iso" -iname 'setup.exe' -print -quit || true)"
-      if [ -n "$SETUP_PATH" ]; then
-        echo "Running Office setup from ISO: $SETUP_PATH"
-        wine "$SETUP_PATH" || echo "Office setup may require GUI/interaction."
-      else
-        echo "No setup.exe found in ISO. Unmounting."
-      fi
-      sudo umount "$TMP_DIR/office_iso" || true
-      rmdir "$TMP_DIR/office_iso" || true
-    else
-      # Attempt to run executable (silent flags vary by Office version; safest: run normally)
-      echo "Attempting to run Office installer via Wine (may require GUI & license acceptance)..."
-      wine "$OFFICE_FILE" || echo "Office installer returned non-zero; may require manual interaction."
-    fi
-  else
-    whiptail --msgbox "لو حابب السكربت يثبت Office تلقائيًا: ضع ملف التثبيت (مثلاً office_installer.exe أو office_installer.iso) داخل $TMP_DIR ومن ثم شغّل هذا السكربت واختر خيار Office." 12 80
-  fi
-fi
-
-# --- Per-prefix launcher tools (CPU/RAM limits) ---
-if [[ " ${CHOICES[*]} " == *" prefix-tools "* ]]; then
-  echo "--- Per-prefix launcher creation ---"
-  # Ask user whether to create new prefix or configure existing
-  PREFIX_ACTION=$(whiptail --title "Per-Prefix Launchers" --menu "اختر إجراء:" 15 60 3 \
-    "1" "Create new WinePrefix with resource-limited launcher" \
-    "2" "Create launcher for existing prefix" 3>&1 1>&2 2>&3) || echo "No selection"
-
-  if [[ "$PREFIX_ACTION" == "1" ]]; then
-    PREFIX_NAME=$(whiptail --inputbox "اكتب اسم الـ WinePrefix الجديد (مثال: prefix_game1):" 8 60 "prefix1" 3>&1 1>&2 2>&3)
-    PREFIX_PATH="$HOME_DIR/.wine_$PREFIX_NAME"
-    echo "Creating new WINEPREFIX at $PREFIX_PATH"
-    mkdir -p "$PREFIX_PATH"
-    export WINEPREFIX="$PREFIX_PATH"
-    wineboot --init || true
-    # Ask resource limits
-    CPU_CORES=$(whiptail --inputbox "كم عدد CPU cores تريد تقييد العملية بها؟ (مثال: 0-3 للـ 4 نواة، أو 1)" 8 60 "0-3" 3>&1 1>&2 2>&3)
-    MEM_MB=$(whiptail --inputbox "كم ذاكرة (بالـ MB) تريد كحد أقصى للعملية؟ (مثال: 4096)" 8 60 "4096" 3>&1 1>&2 2>&3)
-    LAUNCHER="$DESKTOP_DIR/launch-$PREFIX_NAME.sh"
-    cat > "$LAUNCHER" <<EOF
-#!/bin/bash
-# Launcher for WINEPREFIX=$PREFIX_PATH
-export WINEPREFIX="$PREFIX_PATH"
-ulimit -v $((MEM_MB * 1024))   # limit virtual memory in KB
-# CPU affinity (taskset): use provided mask or range. If user provided range like 0-3, convert to mask
-# If it's already a mask, user may edit launcher.
-taskset -c $CPU_CORES wine "\$@"
 EOF
-    chmod +x "$LAUNCHER"
-    add_desktop_entry "$DESKTOP_DIR/$PREFIX_NAME-launcher.desktop" "[Desktop Entry]
-Version=1.0
-Name=Launcher ($PREFIX_NAME)
-Comment=Run programs in WINEPREFIX $PREFIX_NAME with limits
-Exec=$LAUNCHER
-Terminal=false
-Type=Application
-Icon=wine
-Categories=Utility;
-StartupNotify=true
-"
-    whiptail --msgbox "تم إنشاء الـ prefix و launcher:\n$PREFIX_PATH\nLauncher: $LAUNCHER" 10 70
-  elif [[ "$PREFIX_ACTION" == "2" ]]; then
-    EXISTING=$(whiptail --inputbox "اكتب مسار الـ WINEPREFIX الموجود (مثال: /home/you/.wine_game):" 8 60 "$WINEPREFIX_BASE" 3>&1 1>&2 2>&3)
-    PREFIX_PATH="$EXISTING"
-    CPU_CORES=$(whiptail --inputbox "CPU cores (مثال: 0-3):" 8 60 "0-3" 3>&1 1>&2 2>&3)
-    MEM_MB=$(whiptail --inputbox "Memory limit MB (مثال: 4096):" 8 60 "4096" 3>&1 1>&2 2>&3)
-    NAME=$(basename "$PREFIX_PATH")
-    LAUNCHER="$DESKTOP_DIR/launch-$NAME.sh"
-    cat > "$LAUNCHER" <<EOF
-#!/bin/bash
-export WINEPREFIX="$PREFIX_PATH"
-ulimit -v $((MEM_MB * 1024))
-taskset -c $CPU_CORES wine "\$@"
-EOF
-    chmod +x "$LAUNCHER"
-    add_desktop_entry "$DESKTOP_DIR/$NAME-launcher.desktop" "[Desktop Entry]
-Version=1.0
-Name=Launcher ($NAME)
-Comment=Run programs in WINEPREFIX $NAME with limits
-Exec=$LAUNCHER
-Terminal=false
-Type=Application
-Icon=wine
-Categories=Utility;
-StartupNotify=true
-"
-    whiptail --msgbox "Launcher created: $LAUNCHER" 8 60
-  else
-    echo "Skipping prefix launcher creation."
-  fi
+chmod +x "$TELE_DESKTOP"
+
+# --- Notepad++ (Windows) via Wine ---
+info "تنزيل وتثبيت Notepad++ عبر Wine (إذا لم يكن موجودًا)"
+if [ ! -f "$NOTEPADPP_FILE" ]; then
+  wget -O "$NOTEPADPP_FILE" "$NOTEPADPP_URL" || warn "فشل تنزيل Notepad++ installer."
 fi
 
-# Final step: run winecfg once (may open GUI)
-echo "--- Finalizing: winecfg ---"
-winecfg || true
+info "تشغيل مثبت Notepad++ باستخدام wine (سيظهر واجهة التثبيت، قد يطلب تفاعلاً)"
+env WINEPREFIX="$WINEPREFIX" wine "$NOTEPADPP_FILE" || warn "قد يفشل تشغيل مثبت Notepad++ عبر wine أو يتطلب تفاعل."
 
-echo ""
-echo "===== All done. Log: $LOGFILE ====="
-whiptail --msgbox "انتهى التثبيت. راجع السجل: $LOGFILE\nملاحظة: بعض مثبتات .NET أو Office قد تطلب موافقة يدوية أو واجهة GUI. إذا حدث ذلك، أعد تشغيل الخطوة المناسبة يدوياً." 12 80
+# Create a desktop link that launches the Notepad++ installer via wine (كما طلبت اختصار لفتحه بـ wine)
+NPP_DESKTOP="$DESKTOP_DIR/Notepad++ (installer).desktop"
+cat > "$NPP_DESKTOP" <<EOF
+[Desktop Entry]
+Name=Notepad++ (open installer with Wine)
+Exec=env WINEPREFIX="$WINEPREFIX" wine "$NOTEPADPP_FILE"
+Type=Application
+Terminal=false
+Icon=text-x-generic
+Categories=Utility;TextEditor;
+EOF
+chmod +x "$NPP_DESKTOP"
+
+# --- 7zip (p7zip) installation (native) ---
+info "تثبيت 7zip (p7zip-full)"
+apt install -y p7zip-full p7zip-rar || warn "فشل تثبيت p7zip via apt."
+
+# Optionally download 7-Zip Windows portable (if user wants Windows version under wine)
+# You can uncomment below if you want the Windows 7-Zip:
+# wget -O "$HOME/Downloads/7z2201-x64.exe" "https://www.7-zip.org/a/7z2201-x64.exe"
+
+info "اكتملت معظم الخطوات. بعض مثبتات Windows (مثل Notepad++ أو AIO runtimes) تتطلّب تفاعل أثناء التثبيت؛ السكربت شغّل المثبّتات عبر wine لكن لا يمكن إتمام تثبيت GUI تلقائيًا بالكامل هنا."
+
+echo
+info "ملاحظات أخيرة:"
+echo "- ملف AIO runtimes موجود في: $AIO_FILE"
+echo "- اختصارات على الديسكتوب:"
+ls -1 "$DESKTOP_DIR" | grep -E "AIO-Runtimes|Google-Chrome-NoSandbox|Telegram-Desktop|Notepad\+\+" || true
+echo
+info "إذا أردت أضيف خطوات تلقائية لتثبيت التطبيقات داخل wine (مثلاً تثبيت Notepad++ تلقائيًا أو تثبيت dotnet محدد عبر winetricks)، أخبرني وسأحدّث السكربت لعمل ذلك (مع تحذيرات حول الوقت والمساحة والاعتماديات)."
