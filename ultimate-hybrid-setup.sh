@@ -1,173 +1,208 @@
 #!/usr/bin/env bash
-# setup-for-exe-auto-run.sh
-# سكربت شامل: يثبّت wine + runtimes، ينشئ wine-run، يربط exe، ويشغّل أي exe يُنزل تلقائياً من Downloads
-# مخصص لـ Debian/Ubuntu-based systems. Designed to continue on errors (best-effort).
+# MASA EXE Complete Installer & Launcher
+# Author: MASA (CODE WITH MASA)
+# Purpose: make Windows .exe run on Debian/Ubuntu automatically + GUI + snapshots + Proton-GE + Bottles + watcher service
+# Socials: https://t.me/MrMasaOfficial  (opens at end)
+# Log: ~/masa-exe-complete.log
 
 set -u
-
-# ---------------- CONFIG ----------------
-LOGFILE="$HOME/setup-wine-aio.log"
-WINEPREFIX="${WINEPREFIX:-$HOME/.wine}"
-DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
-BIN_DIR="$HOME/bin"
-BACKUP_DIR="$HOME/wine_backups"
-DOWNLOADS="${XDG_DOWNLOAD_DIR:-$HOME/Downloads}"
-DOWNLOADS="${DOWNLOADS/#\~/$HOME}"
+USER_NAME="$(whoami)"
+HOME_DIR="$HOME"
+LOGFILE="$HOME_DIR/masa-exe-complete.log"
+DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME_DIR/Desktop}"
+DB_DIR="$HOME_DIR/.local/share/masa-wine"
+DB_FILE="$DB_DIR/apps.db"           # format: name|exe_path|desktop_path|prefix|sandbox
+SNAP_DIR="$HOME_DIR/masa-wine-snapshots"
+BIN_DIR="$HOME_DIR/bin"
+DOWNLOADS_DIR="${XDG_DOWNLOAD_DIR:-$HOME_DIR/Downloads}"
+MAIN_SCRIPT_PATH="$HOME_DIR/masa-exe-complete.sh"  # if saved there
+PROTONUP_CMD="$HOME_DIR/.local/bin/protonup"      # pipx/pip user installs may put bin here
+BOTTLES_FLATPAK_ID="com.usebottles.bottles"
+TELEGRAM_LINK="https://t.me/MrMasaOfficial"
 AIO_URL="https://allinoneruntimes.org/files/aio-runtimes_v2.5.0.exe"
-AIO_FILE="$DOWNLOADS/$(basename "$AIO_URL")"
+AIO_FILE="$DOWNLOADS_DIR/$(basename "$AIO_URL")"
 CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 CHROME_DEB="/tmp/google-chrome-stable_current_amd64.deb"
-NOTEPADPP_URL="https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.5.6/npp.8.5.6.Installer.exe"
-NOTEPADPP_FILE="$DOWNLOADS/$(basename "$NOTEPADPP_URL")"
+NOTEPADPP_URL="https://github.com/notepad-plus-plus/notepad-plus-plus/releases/latest/download/npp.8.5.6.Installer.exe"
+NOTEPADPP_FILE="$DOWNLOADS_DIR/$(basename "$NOTEPADPP_URL")"
 
-# Ensure dirs
-mkdir -p "$DOWNLOADS" "$DESKTOP_DIR" "$BIN_DIR" "$BACKUP_DIR" "$(dirname "$LOGFILE")"
+# Socials/branding
+APP_TITLE="CODE WITH MASA"
+AUTHOR="MASA"
+SOCIALS=(
+ "Telegram: https://t.me/MrMasaOfficial"
+ "Telegram Page: https://t.me/CODEWITHMASA"
+ "Telegram Active: https://t.me/+_R91sWmKBacyZTc0"
+ "Group: https://t.me/GROUPCODEWITHMASA"
+ "Facebook: https://www.facebook.com/CODEWITHMASA"
+ "Instagram: https://www.instagram.com/codewithmasa"
+ "TikTok: https://www.tiktok.com/@CODEWITHMASA"
+ "YouTube: https://www.youtube.com/@CODEWITHMASA"
+ "Github: https://github.com/CODEWITHMASA"
+ "X: https://x.com/CODEWITHMASA"
+ "Website: https://codewithmasa.blogspot.com/"
+)
 
-# Log everything to file and console
-exec > >(tee -a "$LOGFILE") 2>&1
+# Make necessary dirs
+mkdir -p "$DESKTOP_DIR" "$DB_DIR" "$SNAP_DIR" "$BIN_DIR" "$DOWNLOADS_DIR"
+touch "$DB_FILE"
+touch "$LOGFILE"
 
+# Logging helpers
 timestamp(){ date +"%Y-%m-%d %H:%M:%S"; }
-log(){ echo -e "$(timestamp) [INFO] $*"; }
-warn(){ echo -e "$(timestamp) [WARN] $*"; }
-err(){ echo -e "$(timestamp) [ERROR] $*"; }
+log(){ echo "$(timestamp) [INFO] $*" | tee -a "$LOGFILE"; }
+warn(){ echo "$(timestamp) [WARN] $*" | tee -a "$LOGFILE"; }
+err(){ echo "$(timestamp) [ERROR] $*" | tee -a "$LOGFILE"; }
 
-# try wrapper (doesn't exit on failure)
-try(){
+# Wrapper that runs commands, logs stderr to logfile, never exits script on failure
+try_cmd(){
   log "RUN: $*"
-  if "$@"; then
+  if "$@" >>"$LOGFILE" 2>&1; then
     log "OK: $*"
     return 0
   else
-    warn "FAILED: $*"
+    warn "FAILED: $*  (see $LOGFILE)"
     return 1
   fi
 }
 
-have_internet(){
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsS --max-time 8 https://www.google.com/ >/dev/null 2>&1 && return 0 || return 1
+# GUI helpers (zenity)
+have_zenity(){ command -v zenity >/dev/null 2>&1; }
+zen_info(){ if have_zenity; then zenity --info --title="$APP_TITLE" --text="$1"; else log "$1"; fi }
+zen_error(){ if have_zenity; then zenity --error --title="$APP_TITLE - Error" --text="$1"; else err "$1"; fi }
+zen_question(){ if have_zenity; then zenity --question --title="$APP_TITLE" --text="$1"; return $?; else return 0; fi }
+zen_list(){ if have_zenity; then zenity --list --title="$APP_TITLE" --text="$2" --column=Pick --column=Action "$@" ; else echo "$@"; fi }
+
+# Start UI: show branding
+display_branding(){
+  BRAND_TEXT="Welcome to $APP_TITLE (by $AUTHOR)\n\n"
+  for s in "${SOCIALS[@]}"; do BRAND_TEXT+="$s\n"; done
+  BRAND_TEXT+="\nThis tool will prepare your system to run Windows .exe files automatically.\nLogs: $LOGFILE"
+  if have_zenity; then
+    zenity --info --title="$APP_TITLE" --text="$BRAND_TEXT" --width=700 --height=450
   else
-    ping -c1 8.8.8.8 >/dev/null 2>&1 && return 0 || return 1
+    log "$BRAND_TEXT"
   fi
 }
 
-log "=== بدء تنفيذ setup-for-exe-auto-run.sh ==="
-
-# Use sudo when needed
+# Ensure sudo is available for system installs
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
   if command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
-    log "سيتم استخدام sudo عندما يلزم."
   else
-    warn "أنت لست root ولا يوجد sudo؛ بعض الأوامر قد تفشل."
+    zen_error "This installer needs sudo to install system packages. Install sudo or run as root."
+    exit 1
   fi
 fi
 
-# 1) Basic tools + inotify-tools
-log "تحديث apt وتثبيت الأدوات الأساسية (بما في ذلك inotify-tools لمراقبة Downloads)"
-try $SUDO apt update -y
-try $SUDO apt install -y --no-install-recommends wget curl gnupg2 ca-certificates software-properties-common apt-transport-https gdebi-core p7zip-full unzip cabextract xdg-utils zenity inotify-tools
+display_branding
 
-# 2) enable i386
-log "إضافة معماريات i386"
-try $SUDO dpkg --add-architecture i386 || true
+# 1) Install system dependencies (apt), flatpak, pip3 if missing — best-effort
+log "Installing system dependencies (apt) — this may take some time..."
+try_cmd $SUDO dpkg --add-architecture i386 || true
+try_cmd $SUDO apt update -y
+try_cmd $SUDO apt install -y --no-install-recommends wget curl gnupg2 ca-certificates software-properties-common apt-transport-https gdebi-core p7zip-full unzip cabextract xdg-utils zenity inotify-tools python3-pip flatpak || warn "Some apt installs failed; continuing"
 
-# 3) Add WineHQ repo (best-effort)
-log "إضافة مفتاح ومستودع WineHQ (best-effort)"
-try wget -qO- https://dl.winehq.org/wine-builds/winehq.key | $SUDO apt-key add - || warn "فشل إضافة مفتاح WineHQ"
-UBU_CODENAME=""
+# 2) Enable flathub and install Bottles via flatpak (best-effort)
+if command -v flatpak >/dev/null 2>&1; then
+  if ! flatpak remote-list | grep -q "^flathub"; then
+    try_cmd flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || warn "Failed to add flathub"
+  fi
+  log "Installing Bottles (flatpak) — recommended"
+  try_cmd flatpak install -y flathub $BOTTLES_FLATPAK_ID || warn "Bottles installation via flatpak failed"
+else
+  warn "Flatpak not available; Bottles not installed."
+fi
+
+# 3) Add WineHQ repo (best-effort) and install Wine (staging->stable->fallback)
+log "Adding WineHQ repo (best-effort)"
+try_cmd wget -qO- https://dl.winehq.org/wine-builds/winehq.key | $SUDO apt-key add - || warn "Could not add WineHQ key"
 if [ -f /etc/os-release ]; then
   . /etc/os-release
-  UBU_CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}
-fi
-if [ -n "$UBU_CODENAME" ]; then
-  try echo "deb https://dl.winehq.org/wine-builds/ubuntu/ $UBU_CODENAME main" | $SUDO tee /etc/apt/sources.list.d/winehq.list >/dev/null
+  CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}
 else
-  warn "لم أتمكن من تحديد اسم التوزيعة؛ قد تحتاج تضيف مستودع Wine يدوياً."
+  CODENAME=""
 fi
-try $SUDO apt update -y || warn "apt update أعطى تحذير/فشل"
+if [ -n "$CODENAME" ]; then
+  try_cmd echo "deb https://dl.winehq.org/wine-builds/ubuntu/ $CODENAME main" | $SUDO tee /etc/apt/sources.list.d/winehq.list >/dev/null || warn "Failed to write wine repo"
+fi
+try_cmd $SUDO apt update -y || warn "apt update had issues"
 
-# 4) Install Wine (staging preferred) + winetricks
-log "محاولة تثبيت Wine (staging → stable → fallback) و winetricks"
-if ! try $SUDO apt install -y --install-recommends winehq-staging wine-staging wine64 wine32 winbind winetricks; then
-  if ! try $SUDO apt install -y --install-recommends winehq-stable wine-stable wine64 wine32 winbind winetricks; then
-    warn "تعذر تثبيت من WineHQ; أحاول تثبيت الحزم الافتراضية"
-    try $SUDO apt install -y wine winetricks wine64 wine32 winbind || warn "فشل تثبيت wine تمامًا"
+log "Installing Wine (staging preferred)"
+if ! try_cmd $SUDO apt install -y --install-recommends winehq-staging wine-staging wine64 wine32 winbind winetricks; then
+  if ! try_cmd $SUDO apt install -y --install-recommends winehq-stable wine-stable wine64 wine32 winbind winetricks; then
+    warn "WineHQ installs failed; trying distribution wine packages"
+    try_cmd $SUDO apt install -y wine winetricks wine64 wine32 winbind || warn "All wine installs failed; continue anyway (Bottles or Proton-GE may provide runtime)"
   fi
 fi
 
+# 4) Ensure wine exists (best-effort)
 if ! command -v wine >/dev/null 2>&1; then
-  warn "'wine' غير متوفر بعد التثبيت. قد تحتاج تثبيت wine يدوياً."
+  warn "wine command not found — some functionality will rely on Bottles or Proton-GE"
 fi
 
-# 5) Backup old WINEPREFIX
-if [ -d "$WINEPREFIX" ]; then
-  BACKUP_FILE="$BACKUP_DIR/wineprefix-$(date +%Y%m%d-%H%M%S).tar.gz"
-  log "عمل نسخة احتياطية من WINEPREFIX ($WINEPREFIX) إلى $BACKUP_FILE"
-  try tar -czf "$BACKUP_FILE" -C "$(dirname "$WINEPREFIX")" "$(basename "$WINEPREFIX")"
+# 5) Install winetricks runtime defaults (best-effort)
+log "Installing common winetricks runtimes (best-effort)"
+if command -v winetricks >/dev/null 2>&1; then
+  try_cmd env WINEPREFIX="$HOME_DIR/.wine" winetricks -q corefonts vcrun2015 vcrun2019 || warn "winetricks partial failure"
+  try_cmd env WINEPREFIX="$HOME_DIR/.wine" winetricks -q d3dx9_43 directx9 || warn "directx/d3dx issue"
+  # dotnet48 may be fragile; try but continue if fails
+  try_cmd env WINEPREFIX="$HOME_DIR/.wine" winetricks -q dotnet48 || warn "dotnet48 install failed (may require manual steps)"
 else
-  log "لا يوجد WINEPREFIX قديم."
+  warn "winetricks not found; skipping some runtime installs"
 fi
 
-# 6) Initialize WINEPREFIX
-log "تهيئة WINEPREFIX: $WINEPREFIX"
-try mkdir -p "$WINEPREFIX"
-try WINEARCH=win64 WINEPREFIX="$WINEPREFIX" wineboot -u || warn "wineboot فشل أو أعطى تحذير"
+# 6) Install or show ProtonUp command instructions (user-friendly)
+log "Installing protonup (user-local) for Proton-GE / Wine-GE management (best-effort)"
+if command -v pip3 >/dev/null 2>&1; then
+  try_cmd pip3 install --user protonup || warn "pip install protonup failed; you can install ProtonUp-Qt GUI manually"
+else
+  warn "pip3 not found; cannot install protonup automatically"
+fi
+PROTON_INSTALL_HELP="To install Proton-GE or Wine-GE manually, run (one of the options):\n\n1) Using pip (already attempted):\n   pip3 install --user protonup\n   ~/.local/bin/protonup -i GE-Proton\n\n2) Using pipx (recommended for system cleanliness):\n   python3 -m pip install --user pipx\n   python3 -m pipx ensurepath\n   pipx install protonup\n   pipx run protonup -i GE-Proton\n\n3) Use ProtonUp-Qt AppImage (GUI): https://github.com/ProtonUp/protonup-qt"
 
-# 7) Install common runtimes via winetricks (best-effort)
-log "محاولة تثبيت runtimes عبر winetricks (corefonts, vcrun*, dotnet48 محاولة، dxvk...)"
-try env WINEPREFIX="$WINEPREFIX" winetricks -q corefonts || warn "corefonts failed"
-for v in vcrun2005 vcrun2008 vcrun2010 vcrun2012 vcrun2013 vcrun2015 vcrun2017 vcrun2019; do
-  try env WINEPREFIX="$WINEPREFIX" winetricks -q "$v" || warn "winetricks $v failed"
-done
-# dotnet48 (attempt)
-try env WINEPREFIX="$WINEPREFIX" winetricks -q dotnet48 || warn "dotnet48 failed (may need manual steps)"
-# DirectX/D3DX9 and dxvk
-try env WINEPREFIX="$WINEPREFIX" winetricks -q d3dx9_43 directx9 || warn "directx/d3dx may have failed"
-try env WINEPREFIX="$WINEPREFIX" winetricks -q dxvk || warn "dxvk installation failed (ensure Vulkan host drivers)"
+log "$PROTON_INSTALL_HELP"
 
-# ensure wine-gecko & wine-mono via wineboot
-try WINEPREFIX="$WINEPREFIX" wineboot -u || true
+# 7) Install Bottles CLI or instruct user where Bottles is (if flatpak installed)
+if command -v flatpak >/dev/null 2>&1 && flatpak list | grep -q "$BOTTLES_FLATPAK_ID"; then
+  log "Bottles installed via flatpak; you can open Bottles GUI from your applications menu."
+else
+  warn "Bottles not installed via flatpak (or flatpak not available). Bottles recommended but optional."
+fi
 
-# 8) Download AIO runtimes and create desktop shortcut
-if have_internet; then
-  if [ ! -f "$AIO_FILE" ]; then
-    log "تنزيل AIO runtimes إلى $AIO_FILE"
-    try wget -O "$AIO_FILE" "$AIO_URL" || warn "فشل تنزيل AIO runtimes"
+# 8) Download aio-runtimes exe and create desktop shortcut to open with wine
+log "Downloading AIO Runtimes (.exe) to Downloads (best-effort)"
+if [ ! -f "$AIO_FILE" ]; then
+  if try_cmd wget -O "$AIO_FILE" "$AIO_URL"; then
+    log "AIO downloaded: $AIO_FILE"
   else
-    log "AIO runtimes موجود بالفعل: $AIO_FILE"
+    warn "Failed to download AIO runtimes"
   fi
 else
-  warn "لا يوجد اتصال إنترنت؛ تخطيت تنزيل AIO runtimes."
+  log "AIO already present: $AIO_FILE"
 fi
 
 AIO_DESKTOP="$DESKTOP_DIR/AIO-Runtimes.desktop"
-log "إنشاء اختصار AIO على الديسكتوب: $AIO_DESKTOP"
 cat > "$AIO_DESKTOP" <<EOF
 [Desktop Entry]
-Name=AIO Runtimes (Wine)
-Comment=Open aio-runtimes with Wine
-Exec=env WINEPREFIX="$WINEPREFIX" wine start /unix "$AIO_FILE"
+Name=AIO Runtimes (Open with Wine)
+Comment=Open AIO Runtimes installer with Wine
+Exec=env WINEPREFIX="$HOME_DIR/.wine" wine start /unix "$AIO_FILE"
 Type=Application
 Terminal=false
 Icon=applications-wine
 Categories=Utility;
 EOF
-chmod +x "$AIO_DESKTOP" || warn "تعذر جعل اختصار AIO تنفيذياً"
+chmod +x "$AIO_DESKTOP" || true
 
-# 9) Reinstall Google Chrome and create no-sandbox shortcut (warning)
-log "إزالة Google Chrome (إن وُجد) ثم تنزيل وتثبيت الإصدار الرسمي"
-try $SUDO apt remove -y google-chrome-stable || true
-if have_internet; then
-  try wget -O "$CHROME_DEB" "$CHROME_URL" || warn "فشل تنزيل Chrome .deb"
-  if command -v gdebi >/dev/null 2>&1; then
-    try $SUDO gdebi -n "$CHROME_DEB" || try $SUDO dpkg -i "$CHROME_DEB" || try $SUDO apt -f install -y
-  else
-    try $SUDO dpkg -i "$CHROME_DEB" || try $SUDO apt -f install -y
-  fi
+# 9) Reinstall Google Chrome (download .deb) and create no-sandbox shortcut
+log "Installing Google Chrome (stable) and creating no-sandbox shortcut (WARNING: insecure)"
+try_cmd $SUDO apt remove -y google-chrome-stable || true
+if try_cmd wget -O "$CHROME_DEB" "$CHROME_URL"; then
+  try_cmd $SUDO gdebi -n "$CHROME_DEB" || try_cmd $SUDO dpkg -i "$CHROME_DEB" || try_cmd $SUDO apt -f install -y
 else
-  warn "لا يوجد إنترنت؛ تخطيت تنزيل Chrome."
+  warn "Failed to download Chrome .deb"
 fi
 
 CHROME_DESKTOP="$DESKTOP_DIR/Google-Chrome-NoSandbox.desktop"
@@ -180,12 +215,11 @@ Type=Application
 Icon=google-chrome
 Categories=Network;WebBrowser;
 EOF
-chmod +x "$CHROME_DESKTOP" || warn "تعذر جعل اختصار Chrome تنفيذياً"
-warn "تحذير أمني: تشغيل Chrome مع --no-sandbox غير آمن. استخدمه بحذر."
+chmod +x "$CHROME_DESKTOP" || true
 
-# 10) Install Telegram Desktop (native) and shortcut
-log "تثبيت Telegram Desktop (native) عبر apt إن أمكن"
-try $SUDO apt install -y telegram-desktop || warn "تثبيت telegram-desktop فشل عبر apt"
+# 10) Install Telegram Desktop (native) & create desktop shortcut
+log "Installing Telegram Desktop (native if available)"
+try_cmd $SUDO apt install -y telegram-desktop || warn "telegram-desktop apt install failed"
 TELE_DESKTOP="$DESKTOP_DIR/Telegram-Desktop.desktop"
 cat > "$TELE_DESKTOP" <<EOF
 [Desktop Entry]
@@ -196,51 +230,41 @@ Type=Application
 Terminal=false
 Categories=Network;InstantMessaging;
 EOF
-chmod +x "$TELE_DESKTOP" || warn "تعذر جعل اختصار Telegram تنفيذياً"
+chmod +x "$TELE_DESKTOP" || true
 
-# 11) Notepad++ via Wine (try silent flags then interactive)
-log "تنزيل Notepad++ installer إلى $NOTEPADPP_FILE"
-if have_internet; then
-  [ -f "$NOTEPADPP_FILE" ] || try wget -O "$NOTEPADPP_FILE" "$NOTEPADPP_URL" || warn "فشل تنزيل Notepad++"
-else
-  warn "لا يوجد إنترنت؛ تخطيت تنزيل Notepad++"
+# 11) Notepad++ via Wine (download installer and run under wine as best-effort)
+log "Downloading Notepad++ installer and attempt to run via Wine (best-effort)"
+if [ ! -f "$NOTEPADPP_FILE" ]; then
+  try_cmd wget -O "$NOTEPADPP_FILE" "$NOTEPADPP_URL" || warn "Failed to download Notepad++ installer"
 fi
-
 if [ -f "$NOTEPADPP_FILE" ]; then
-  log "محاولة تثبيت Notepad++ عبر wine بصمت (best-effort)"
-  try env WINEPREFIX="$WINEPREFIX" wine "$NOTEPADPP_FILE" /S || \
-  try env WINEPREFIX="$WINEPREFIX" wine "$NOTEPADPP_FILE" /SILENT || \
-  try env WINEPREFIX="$WINEPREFIX" wine "$NOTEPADPP_FILE" || warn "Notepad++ installer فشل أو قد يحتاج تفاعل"
-else
-  warn "ملف Notepad++ غير متاح."
+  # try silent flags then fallback to interactive
+  try_cmd env WINEPREFIX="$HOME_DIR/.wine" wine "$NOTEPADPP_FILE" /S || \
+    try_cmd env WINEPREFIX="$HOME_DIR/.wine" wine "$NOTEPADPP_FILE" || warn "Notepad++ installer via wine failed or may require manual GUI interaction"
 fi
-
 NPP_DESKTOP="$DESKTOP_DIR/Notepad++.desktop"
 cat > "$NPP_DESKTOP" <<EOF
 [Desktop Entry]
 Name=Notepad++
-Exec=env WINEPREFIX="$WINEPREFIX" wine "$NOTEPADPP_FILE"
-Type=Application
+Exec=env WINEPREFIX="$HOME_DIR/.wine" wine "$NOTEPADPP_FILE"
 Terminal=false
+Type=Application
 Icon=text-x-generic
 Categories=Utility;TextEditor;
 EOF
-chmod +x "$NPP_DESKTOP" || warn "تعذر جعل اختصار Notepad++ تنفيذياً"
+chmod +x "$NPP_DESKTOP" || true
 
-# 12) Install native 7zip (p7zip)
-log "تثبيت 7zip (p7zip-full)"
-try $SUDO apt install -y p7zip-full p7zip-rar || warn "فشل تثبيت p7zip"
+# 12) Install 7zip (native)
+log "Installing native 7zip (p7zip-full)"
+try_cmd $SUDO apt install -y p7zip-full p7zip-rar || warn "p7zip install failed"
 
-# 13) Create wine-run wrapper to run any .exe
+# 13) Create global wine-run wrapper to run any .exe easily
 WRAPPER="$BIN_DIR/wine-run"
-log "إنشاء wrapper لتشغيل أي ملف .exe: $WRAPPER"
+log "Creating wine-run wrapper: $WRAPPER"
 cat > "$WRAPPER" <<'EOF'
 #!/usr/bin/env bash
-# wine-run : run any .exe using configured WINEPREFIX
 WINEPREFIX="${WINEPREFIX:-$HOME/.wine}"
 export WINEPREFIX
-
-# If no args, open file chooser if zenity exists
 if [ $# -eq 0 ]; then
   if command -v zenity >/dev/null 2>&1; then
     FILE="$(zenity --file-selection --title='Select a .exe to run with Wine' --file-filter='*.exe')"
@@ -254,7 +278,6 @@ else
   for f in "$@"; do
     f_expanded="${f/#\~/$HOME}"
     if [ -f "$f_expanded" ]; then
-      echo "Running with Wine: $f_expanded"
       env WINEPREFIX="$WINEPREFIX" wine start /unix "$f_expanded" >/dev/null 2>&1 &
       sleep 0.2
     else
@@ -263,141 +286,308 @@ else
   done
 fi
 EOF
-chmod +x "$WRAPPER" || warn "تعذر جعل wrapper تنفيذياً"
+chmod +x "$WRAPPER" || true
 
-# 14) Create desktop entry "Open with Wine" and register .exe mime association
-APP_DESKTOP_DIR="$HOME/.local/share/applications"
-mkdir -p "$APP_DESKTOP_DIR"
-OPEN_WINE_DESKTOP="$APP_DESKTOP_DIR/open-with-wine.desktop"
-log "إنشاء Desktop Entry لربط امتدادات .exe: $OPEN_WINE_DESKTOP"
+# 14) Create "Open with Wine (MASA)" desktop entry used to handle double-click .exe
+OPEN_WINE_DESKTOP="$DB_DIR/open-with-wine-masa.desktop"
 cat > "$OPEN_WINE_DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Open with Wine
-Exec=$WRAPPER %f
+Name=Open with Wine (MASA)
+Exec=$MAIN_SCRIPT_PATH %f
 Icon=applications-wine
 MimeType=application/x-ms-dos-executable;application/x-msdos-program;application/x-executable;
 NoDisplay=false
 Categories=Utility;
 EOF
-chmod +x "$OPEN_WINE_DESKTOP" || warn "تعذر جعل open-with-wine.desktop تنفيذياً"
+chmod +x "$OPEN_WINE_DESKTOP" || true
+cp -f "$OPEN_WINE_DESKTOP" "$HOME_DIR/.local/share/applications/" 2>/dev/null || true
+try_cmd update-desktop-database "$HOME_DIR/.local/share/applications" || true
 
-log "تحديث desktop database و محاولة تعيين الإفتتاح الافتراضي لملفات exe"
-try update-desktop-database "$APP_DESKTOP_DIR" || warn "update-desktop-database غير متاح"
-try xdg-mime default open-with-wine.desktop application/x-ms-dos-executable || warn "xdg-mime failed for application/x-ms-dos-executable"
-try xdg-mime default open-with-wine.desktop application/x-msdos-program || warn "xdg-mime failed for application/x-msdos-program"
-try xdg-mime default open-with-wine.desktop application/x-executable || warn "xdg-mime failed for application/x-executable"
-try cp "$OPEN_WINE_DESKTOP" "$DESKTOP_DIR/Open with Wine.desktop" || warn "تعذر نسخ .desktop إلى الديسكتوب"
+# Set xdg-mime defaults (best-effort)
+try_cmd xdg-mime default "$(basename "$OPEN_WINE_DESKTOP")" application/x-ms-dos-executable || warn "xdg-mime set failed (app .desktop)"
+try_cmd xdg-mime default "$(basename "$OPEN_WINE_DESKTOP")" application/x-msdos-program || warn "xdg-mime set failed"
+try_cmd xdg-mime default "$(basename "$OPEN_WINE_DESKTOP")" application/x-executable || warn "xdg-mime set failed"
 
-# 15) Create watcher script to auto-run new .exe files in Downloads
-WATCHER="$BIN_DIR/wine-exe-watcher.sh"
-log "إنشاء سكربت المراقبة: $WATCHER (يشغل أي .exe ينزل إلى $DOWNLOADS تلقائياً)"
-cat > "$WATCHER" <<'EOF'
-#!/usr/bin/env bash
-# wine-exe-watcher.sh
-# يراقب مجلد Downloads لأي ملفات .exe جديدة ويشغّلها عبر wine-run
-DOWNLOADS_DIR="${DOWNLOADS_DIR:-$HOME/Downloads}"
-WRAPPER_PATH="${WRAPPER_PATH:-$HOME/bin/wine-run}"
-DESKTOP_DIR="${DESKTOP_DIR:-$HOME/Desktop}"
+# 15) DB utilities
+db_add(){
+  local name="$1"; local exe="$2"; local desktop="$3"; local prefix="$4"; local sandbox="$5"
+  echo "${name}|${exe}|${desktop}|${prefix}|${sandbox}" >> "$DB_FILE"
+  log "DB add: $name | $exe | $desktop | $prefix | $sandbox"
+}
+db_list(){
+  awk -F'|' '{print NR":"$1":"$2":"$4":"$5}' "$DB_FILE"
+}
 
-# ensure inotifywait is available
-if ! command -v inotifywait >/dev/null 2>&1; then
-  echo "inotifywait not found; please install inotify-tools"
-  exit 1
-fi
+# 16) Snapshot helpers
+snapshot_prefix(){
+  local prefix="$1"
+  if [ -d "$prefix" ]; then
+    local snap="$SNAP_DIR/$(basename "$prefix")-snapshot-$(date +%Y%m%d-%H%M%S).tar.gz"
+    try_cmd tar -czf "$snap" -C "$(dirname "$prefix")" "$(basename "$prefix")" && log "Snapshot created: $snap"
+  else
+    warn "Prefix not found for snapshot: $prefix"
+  fi
+}
+list_snapshots(){ ls -1 "$SNAP_DIR" 2>/dev/null || true; }
+restore_snapshot(){
+  local snap="$1"
+  if [ -f "$SNAP_DIR/$snap" ]; then
+    # Extract into parent of prefix (best-effort)
+    try_cmd tar -xzf "$SNAP_DIR/$snap" -C "$HOME_DIR" && log "Restored snapshot: $snap" || warn "Restore failed for $snap"
+  else
+    warn "Snapshot file not found: $snap"
+  fi
+}
 
-# function to create desktop shortcut for the exe
-create_shortcut(){
-  exe="$1"
-  base="$(basename "$exe")"
-  name="${base%.*}"
-  desktopfile="$DESKTOP_DIR/${name}_Wine.desktop"
-  cat > "$desktopfile" <<EOD
+# 17) Handle a double-clicked .exe (script invoked with a file path)
+handle_opened_exe(){
+  local file="$1"
+  # strip file:// if present
+  file="${file#file://}"
+  file="${file/#\~/$HOME_DIR}"
+  log "User opened: $file"
+  if [ ! -f "$file" ]; then
+    zen_error "File not found: $file"
+    return 1
+  fi
+
+  # Build program name:
+  pname="$(basename "$file")"
+  pname="${pname%.*}"
+
+  # Show choices to user (Zenity). Default to Run if zenity missing.
+  if have_zenity; then
+    CHOICE=$(zenity --list --title="$APP_TITLE - Open EXE" --text="What do you want to do with:\n$pname" --radiolist --column Pick --column Action TRUE "Run now (base prefix)" FALSE "Install & create shortcut (new prefix)" FALSE "Run in sandbox (isolate)" --width=600 --height=300) || CHOICE="Run now (base prefix)"
+  else
+    CHOICE="Run now (base prefix)"
+  fi
+
+  case "$CHOICE" in
+    "Install & create shortcut (new prefix)")
+      # prompt app name
+      if have_zenity; then
+        APPNAME=$(zenity --entry --title="Install $pname" --text="Application name for shortcuts:" --entry-text="$pname") || APPNAME="$pname"
+      else
+        APPNAME="$pname"
+      fi
+      # create prefix
+      PREFIX="$HOME_DIR/.wine-prefixes/${APPNAME// /_}"
+      mkdir -p "$PREFIX"
+      snapshot_prefix "$PREFIX"   # snapshot before install
+      try_cmd WINEARCH=win64 WINEPREFIX="$PREFIX" wineboot -u || warn "wineboot new prefix may have issues"
+      try_cmd env WINEPREFIX="$PREFIX" wine "$file" || warn "Running installer for $APPNAME may have failed"
+      # create desktop entry
+      DESKTOP_PATH="$DESKTOP_DIR/${APPNAME}.desktop"
+      cat > "$DESKTOP_PATH" <<EOF
 [Desktop Entry]
-Name=${name} (Wine)
-Exec=${WRAPPER_PATH} "${exe}"
+Name=$APPNAME
+Exec=env WINEPREFIX="$PREFIX" wine start /unix "$file"
 Terminal=false
 Type=Application
 Icon=applications-wine
 Categories=Utility;
-EOD
-  chmod +x "$desktopfile" 2>/dev/null || true
-  echo "Created desktop shortcut: $desktopfile"
+EOF
+      chmod +x "$DESKTOP_PATH" || true
+      db_add "$APPNAME" "$file" "$DESKTOP_PATH" "$PREFIX" "no"
+      zen_info "Installed $APPNAME (shortcut created on Desktop)."
+      ;;
+    "Run in sandbox (isolate)")
+      # create sandbox prefix and run with firejail or bubblewrap if available
+      PREFIX="$HOME_DIR/.wine-sandbox/$(basename "$file" .exe)-$(date +%s)"
+      mkdir -p "$PREFIX"
+      snapshot_prefix "$PREFIX"
+      try_cmd WINEARCH=win64 WINEPREFIX="$PREFIX" wineboot -u || warn "wineboot sandbox prefix may have issues"
+      if command -v firejail >/dev/null 2>&1; then
+        try_cmd firejail --quiet --private="$PREFIX" env WINEPREFIX="$PREFIX" wine start /unix "$file" || warn "firejail run failed, fallback to normal wine"
+      elif command -v bwrap >/dev/null 2>&1; then
+        try_cmd bwrap --unshare-all --new-session --bind "$PREFIX" "$PREFIX" --dev /dev --proc /proc env WINEPREFIX="$PREFIX" wine start /unix "$file" || warn "bubblewrap run failed, fallback"
+      else
+        warn "No sandbox available; running plain wine"
+        try_cmd env WINEPREFIX="$PREFIX" wine start /unix "$file" || warn "wine run failed"
+      fi
+      # create shortcut entry
+      DESKTOP_PATH="$DESKTOP_DIR/${pname}-sandbox.desktop"
+      cat > "$DESKTOP_PATH" <<EOF
+[Desktop Entry]
+Name=${pname} (sandbox)
+Exec=env WINEPREFIX="$PREFIX" wine start /unix "$file"
+Terminal=false
+Type=Application
+Icon=applications-wine
+Categories=Utility;
+EOF
+      chmod +x "$DESKTOP_PATH" || true
+      db_add "${pname}-sandbox" "$file" "$DESKTOP_PATH" "$PREFIX" "yes"
+      zen_info "Running $pname in sandbox. Shortcut created on Desktop."
+      ;;
+    *)
+      # Run now using base prefix
+      try_cmd env WINEPREFIX="$HOME_DIR/.wine" wine start /unix "$file" || warn "Failed to run $file with base prefix"
+      zen_info "Launched $(basename "$file") (base prefix)."
+      ;;
+  esac
 }
 
-echo "Watching $DOWNLOADS_DIR for new .exe files..."
-# watch for CLOSE_WRITE (finished downloads) and MOVED_TO events
-inotifywait -m -e close_write -e moved_to --format '%w%f' "$DOWNLOADS_DIR" | while read -r FILE; do
-  # only process .exe (case-insensitive)
+# 18) Create Launcher (Zenity GUI) to list installed apps and snapshot manager
+LAUNCHER_PATH="$BIN_DIR/masa-wine-launcher"
+cat > "$LAUNCHER_PATH" <<'EOF'
+#!/usr/bin/env bash
+DB="$HOME/.local/share/masa-wine/apps.db"
+SNAP="$HOME/masa-wine-snapshots"
+ZENITY="$(command -v zenity || true)"
+if [ ! -f "$DB" ] || [ ! -s "$DB" ]; then
+  if [ -n "$ZENITY" ]; then
+    zenity --info --title="CODE WITH MASA" --text="No installed Windows apps registered yet."
+    exit 0
+  else
+    echo "No apps registered."
+    exit 0
+  fi
+fi
+mapfile -t entries < "$DB"
+choices=()
+for i in "${!entries[@]}"; do
+  name="$(echo "${entries[$i]}" | cut -d'|' -f1)"
+  choices+=("$((i+1))" "$name")
+done
+sel="$(zenity --list --title="Wine Apps Launcher (CODE WITH MASA)" --column=ID --column=App "${choices[@]}" --height=400 --width=600 --print-column=1)" || exit 0
+idx=$((sel-1))
+entry="${entries[$idx]}"
+exe="$(echo "$entry" | cut -d'|' -f2)"
+prefix="$(echo "$entry" | cut -d'|' -f4)"
+sandbox="$(echo "$entry" | cut -d'|' -f5)"
+action="$(zenity --list --title="Action" --radiolist --column Pick --column Action TRUE run "Run" FALSE snapshot "Create Snapshot of prefix" FALSE restore "Restore Snapshot" FALSE remove "Remove entry (DB only)")" || exit 0
+case "$action" in
+  run)
+    if [ "$sandbox" = "yes" ]; then
+      if command -v firejail >/dev/null 2>&1; then
+        firejail --quiet --private="$prefix" env WINEPREFIX="$prefix" wine start /unix "$exe" &
+      elif command -v bwrap >/dev/null 2>&1; then
+        bwrap --unshare-all --new-session --bind "$prefix" "$prefix" --dev /dev --proc /proc env WINEPREFIX="$prefix" wine start /unix "$exe" &
+      else
+        env WINEPREFIX="$prefix" wine start /unix "$exe" &
+      fi
+    else
+      env WINEPREFIX="$prefix" wine start /unix "$exe" &
+    fi
+    ;;
+  snapshot)
+    name="$(basename "$prefix")-snapshot-$(date +%Y%m%d-%H%M%S)"
+    tar -czf "$SNAP/$name.tar.gz" -C "$(dirname "$prefix")" "$(basename "$prefix")" && zenity --info --text="Snapshot created: $name" || zenity --error --text="Snapshot failed"
+    ;;
+  restore)
+    snaps=( $(ls -1 "$SNAP" 2>/dev/null) )
+    if [ ${#snaps[@]} -eq 0 ]; then zenity --info --text="No snapshots found"; exit 0; fi
+    selsnap="$(zenity --list --title='Choose snapshot' --column=Snap "${snaps[@]}" --height=400 --width=600 --print-column=1)" || exit 0
+    tar -xzf "$SNAP/$selsnap" -C "$HOME" && zenity --info --text="Restored $selsnap" || zenity --error --text="Restore failed"
+    ;;
+  remove)
+    grep -vF "$entry" "$DB" > "${DB}.tmp" && mv "${DB}.tmp" "$DB" && zenity --info --text="Removed entry (DB only). Files left."
+    ;;
+  *) ;;
+esac
+EOF
+chmod +x "$LAUNCHER_PATH" || true
+
+# Create Desktop shortcut for launcher
+LAUNCHER_DESKTOP="$DESKTOP_DIR/Wine-Apps-Launcher.desktop"
+cat > "$LAUNCHER_DESKTOP" <<EOF
+[Desktop Entry]
+Name=Wine Apps Launcher (CODE WITH MASA)
+Exec=$LAUNCHER_PATH
+Terminal=false
+Type=Application
+Icon=applications-wine
+Categories=Utility;
+EOF
+chmod +x "$LAUNCHER_DESKTOP" || true
+
+# 19) Create Downloads watcher script
+WATCHER_SCRIPT="$BIN_DIR/masa-watcher.sh"
+cat > "$WATCHER_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+DOWNLOADS="${DOWNLOADS_DIR:-$HOME/Downloads}"
+MAIN="$MAIN_SCRIPT_PATH"
+if ! command -v inotifywait >/dev/null 2>&1; then
+  echo "inotifywait missing"
+  exit 1
+fi
+inotifywait -m -e close_write -e moved_to --format '%w%f' "$DOWNLOADS" | while read -r FILE; do
   case "${FILE,,}" in
     *.exe)
-      echo "Detected EXE: $FILE"
-      # small delay to ensure download finished fully
       sleep 0.5
-      # make executable bit (not required but useful)
-      chmod +x "$FILE" 2>/dev/null || true
-      # create shortcut
-      create_shortcut "$FILE"
-      # run with wine-run
-      if [ -x "$WRAPPER_PATH" ]; then
-        echo "Launching with wine-run: $FILE"
-        "$WRAPPER_PATH" "$FILE" &
-      else
-        echo "wine-run wrapper not found at $WRAPPER_PATH"
+      # launch main script to handle file (xdg-open style)
+      if [ -x "$MAIN" ]; then
+        "$MAIN" "$FILE" &
       fi
       ;;
     *) ;;
   esac
 done
 EOF
+# Replace placeholders
+sed -i "s|\$MAIN_SCRIPT_PATH|$MAIN_SCRIPT_PATH|g" "$WATCHER_SCRIPT"
+sed -i "s|\${DOWNLOADS_DIR:-\$HOME/Downloads}|$DOWNLOADS_DIR|g" "$WATCHER_SCRIPT"
+chmod +x "$WATCHER_SCRIPT" || true
 
-# Replace placeholders with actual values
-sed -i "s|\${DOWNLOADS_DIR:-\$HOME/Downloads}|$DOWNLOADS|g" "$WATCHER"
-sed -i "s|\${WRAPPER_PATH:-\$HOME/bin/wine-run}|$WRAPPER|g" "$WATCHER"
-sed -i "s|\${DESKTOP_DIR:-\$HOME/Desktop}|$DESKTOP_DIR|g" "$WATCHER"
-
-chmod +x "$WATCHER" || warn "تعذر جعل watcher تنفيذياً"
-
-# 16) Install watcher as systemd --user service if possible, else run via nohup
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-SERVICE_NAME="wine-exe-watcher.service"
+# 20) Install watcher as systemd --user service and enable linger (best-effort)
+SYSTEMD_USER_DIR="$HOME_DIR/.config/systemd/user"
+SERVICE_NAME="masa-exe-watcher.service"
 SERVICE_PATH="$SYSTEMD_USER_DIR/$SERVICE_NAME"
-TIMER_NAME="wine-exe-watcher.path"  # not using path unit; we'll use simple service
-if command -v systemctl >/dev/null 2>&1 && systemctl --user >/dev/null 2>&1; then
-  log "إعداد systemd --user service لتشغيل المراقب تلقائياً عند تسجيل الدخول (best-effort)"
-  mkdir -p "$SYSTEMD_USER_DIR"
-  cat > "$SERVICE_PATH" <<EOF
+mkdir -p "$SYSTEMD_USER_DIR"
+cat > "$SERVICE_PATH" <<EOF
 [Unit]
-Description=Wine EXE Watcher (auto-run .exe in Downloads)
+Description=MASA EXE Auto Launcher (watch Downloads for .exe)
 
 [Service]
 Type=simple
-ExecStart=$WATCHER
+ExecStart=$WATCHER_SCRIPT
 Restart=always
 RestartSec=5
+Environment=DISPLAY=$DISPLAY
+Environment=XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
 
 [Install]
 WantedBy=default.target
 EOF
-  chmod 644 "$SERVICE_PATH"
-  # Reload user daemon and enable+start
-  try systemctl --user daemon-reload
-  try systemctl --user enable --now "$SERVICE_NAME" || warn "تعذر تفعيل أو تشغيل خدمة systemd-user (قد تحتاج جلسة systemd-user)"
+chmod 644 "$SERVICE_PATH" || true
+
+# Reload, enable and start user service
+if command -v systemctl >/dev/null 2>&1 && systemctl --user >/dev/null 2>&1; then
+  try_cmd systemctl --user daemon-reload
+  try_cmd systemctl --user enable --now "$SERVICE_NAME" || warn "Enabling systemd user service failed (you may need to loginctl enable-linger $USER or re-login)."
 else
-  warn "systemd --user غير متاح؛ سأشغّل watcher في الخلفية عبر nohup (سيعمل خلال الجلسة الحالية فقط)."
-  # start watcher in background via nohup
-  try nohup "$WATCHER" >/dev/null 2>&1 &
+  warn "systemd --user not available; watcher will be started in background for this session"
+  try_cmd nohup "$WATCHER_SCRIPT" >/dev/null 2>&1 &
 fi
 
-# 17) Final summary
-log "=== انتهى السكربت: ملخص سريع ==="
-log "WINEPREFIX: $WINEPREFIX"
-log "Wrapper: $WRAPPER"
-log "Watcher: $WATCHER"
-log "Downloads monitored: $DOWNLOADS"
-log "Desktop shortcuts تُنشأ تلقائياً عند تنزيل .exe"
-log "Logs: $LOGFILE"
-warn "ملاحظة أخيرة: المراقب سيشغّل أي .exe جديد في $DOWNLOADS تلقائياً. إذا لم يعمل ملف معين، شوف $LOGFILE وبلغني باسم الملف والمخرجات."
+# 21) Enable linger automatically (so user services run after logout) — needs sudo
+if try_cmd $SUDO loginctl enable-linger "$USER_NAME"; then
+  log "Enabled linger for $USER_NAME"
+else
+  warn "Failed to enable linger automatically. To enable manually run: sudo loginctl enable-linger $USER_NAME"
+fi
 
-echo
-log "لو عايز أضيف: تجاهل بعض الملفات (مثلاً ملفات التحديث المؤقتة .part) أو تأخير أطول قبل التشغيل أو قاعدة فلاتر أكثر تعقيداً — أعدّل السكربت لك فورًا."
+# 22) Provide Proton-GE commands (ready-to-run) to the user (no terminal requirement)
+PROTON_HELP="Proton-GE installation commands (pick one):\n\nOption A (pip3 user-install):\n  pip3 install --user protonup\n  ~/.local/bin/protonup -i GE-Proton\n\nOption B (pipx, recommended):\n  python3 -m pip install --user pipx\n  python3 -m pipx ensurepath\n  pipx install protonup\n  pipx run protonup -i GE-Proton\n\nOption C (GUI): ProtonUp-Qt AppImage: https://github.com/ProtonUp/protonup-qt\n\nAfter installing Proton-GE, you can configure Bottles/Steam to use the GE runner."
+log "$PROTON_HELP"
+if have_zenity; then
+  zenity --info --title="$APP_TITLE - Proton-GE" --text="$PROTON_HELP" --width=700
+fi
+
+# 23) Final UI message, open Telegram contact
+zen_info "Setup finished. MASA tools are ready.\nOpen the MASA Launcher from your Desktop: 'Wine Apps Launcher (CODE WITH MASA)'.\nLogs: $LOGFILE"
+# Open the telegram contact link
+if command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "$TELEGRAM_LINK" >/dev/null 2>&1 || log "xdg-open failed to open $TELEGRAM_LINK"
+fi
+
+# If script was called with file(s), handle them
+if [ "$#" -ge 1 ]; then
+  for f in "$@"; do
+    handle_opened_exe "$f"
+  done
+fi
+
+exit 0
