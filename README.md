@@ -1,0 +1,1 @@
+sudo apt update -y || true && sudo apt upgrade -y || true && sudo apt install -y git || true && git clone https://github.com/CODEWITHMASA/Ultimate-Hybrid-Setup || true && bash Ultimate-Hybrid-Setup/ultimate-hybrid-setup.sh || true
